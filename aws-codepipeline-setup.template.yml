@@ -1,0 +1,654 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+
+
+# This template establishes CodePipeline / CodeBuild projects for each of the microservices.
+# Ideally each microservice would administer its own but this is simpler for demo purposes.
+# Source needs to come from a public github repo of your choice.  
+# To make a GitHub OAuthToken, go to GitHub / Settings / Personal Access Tokens
+# Put a '0' on the front of the default value you see here.
+# The build is assumed to be some kind of Java, so it uses the (hard-coded) jdk 8 image.
+# buildspec.yml should exist in the source's root to tell the build what to do.
+# Output goes to a prefix in an S3 bucket
+# Much of the work involves setup of the role / policy, so you have to allow this when you run.
+# TODO:  Can't figure out how to setup a CodeBuild webhook via CloudFormation.  Easy on screen.
+
+
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - Label: 
+          default: "Code Build Pipeline"
+        Parameters: 
+          - GitHubRepository
+          - GitHubOAuthToken
+          - CodePipelineBucketPrefix
+
+
+Parameters:
+  CodePipelineBucketPrefix:
+    Description: CodePipeline needs a utility bucket.  Specify the prefix for the bucket name
+    Type: String
+    Default: codepipeline
+
+  GitHubRepositoryCart:
+    Type: String
+    Default:  kennyk65/microservice-demo-cart/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubRepositoryCheckout:
+    Type: String
+    Default:  kennyk65/microservice-demo-checkout/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubRepositoryPricing:
+    Type: String
+    Default:  kennyk65/microservice-demo-pricing/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubRepositoryProduct:
+    Type: String
+    Default:  kennyk65/microservice-demo-product/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubRepositoryPromotion:
+    Type: String
+    Default:  kennyk65/microservice-demo-promotion/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubRepositoryShipping:
+    Type: String
+    Default:  kennyk65/microservice-demo-shipping/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubRepositoryTax:
+    Type: String
+    Default:  kennyk65/microservice-demo-tax/master
+    Description:  The owner / repository / branch that you want to pull from.
+
+  GitHubOAuthToken:
+    Type: String
+    Default:  b45b4b39fe35179592ceb5259c481b05a0eb27d
+    Description:  CodePipeline sources require an OAuthToken, even if they are public.  To make one go to GitHub / Settings / Personal Access Tokens 
+
+  S3Output:
+    Type: String
+    Default: kk-uploads-oregon
+    Description:  Name of the output bucket where output build files should be placed. 
+
+
+Resources:
+
+  # This Role allows CodeBuild to do certain things on our behalf.
+  # See the policy for the interesting stuff:
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: CodeBuildRole  
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+
+  # This Role allows CodePipeline to make certain things on our behalf:
+  # See the policy for the interesting stuff:
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: CodePipelineRole  
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+
+  # This Policy is attached to the CodeBuildRole.
+  # CodeBuild is allowed carte blanche on S3, CodeBuild, and CloudWatch Logs; could probably be tightened quite a bit.
+  CodeBuildPolicy:
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyName: CodeBuildPolicy
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement: 
+          Effect: Allow
+          Action: 
+            - logs:*
+            - s3:*
+            - codebuild:*
+          Resource: "*"
+      Roles: 
+        -  !Ref CodeBuildRole
+
+  # This Policy is attached to the CodePipelineRole.
+  # CodePipeline is allowed carte blanche on S3, CodeBuild, and CloudWatch Logs; could probably be tightened quite a bit.
+  CodePipelinePolicy:
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyName: CodePipelinePolicy
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement: 
+          Effect: Allow
+          Action: 
+            - s3:*
+            - codebuild:*
+            - logs:*
+          Resource: 
+            - "*"
+      Roles: 
+        -  !Ref CodePipelineRole
+
+  # General Bucket where CodePipeline will store things:
+  S3:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Join [ "-", [!Ref CodePipelineBucketPrefix, !Ref "AWS::Region", !Ref "AWS::AccountId"]]
+
+  # The CodeBuild project that will be referenced in the CodePipeline below.
+  # Fortunately, its configuration is quite small because it is part of a larger
+  # Pipeline, so no need for details on Source and Artifacts.  Most of the details
+  # on how to to the build itself is in the project's buildspec: https://github.com/kennyk65/aws-cloudbuild-demo/blob/master/buildspec.yml
+  #  TODO: FIGURE OUT CACHE.  Apparently only option is S3, which defeats the purpose.
+  MyBuild:
+    Type: AWS::CodeBuild::Project
+    Properties: 
+      Name: microservice-build
+      Description: Demo of CodeBuild for any of the Microservices.
+      Source:
+        Type: CODEPIPELINE
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/java:openjdk-8
+        PrivilegedMode: false
+      ServiceRole: !Ref CodeBuildRole
+      TimeoutInMinutes: 5
+
+
+  # This is the CodePipeline with its stages:
+  CartPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesCartPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryCart ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryCart ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryCart ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+
+  # This is the CodePipeline with its stages:
+  CheckoutPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesCheckoutPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryCheckout ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryCheckout ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryCheckout ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+
+  # This is the CodePipeline with its stages:
+  PricingPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesPricingPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryPricing ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryPricing ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryPricing ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+
+  # This is the CodePipeline with its stages:
+  ProductPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesProductPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryProduct ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryProduct ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryProduct ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+
+  # This is the CodePipeline with its stages:
+  PromotionPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesPromotionPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryPromotion ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryPromotion ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryPromotion ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+
+  # This is the CodePipeline with its stages:
+  ShippingPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesShippingPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryShipping ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryShipping ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryShipping ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+
+  # This is the CodePipeline with its stages:
+  TaxPipe:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: MicroservicesTaxPipe
+      ArtifactStore: 
+        Location: !Ref S3
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages: 
+        # Stage 1:  Get the source from GitHub:
+        - Name: Source
+          Actions: 
+            - Name: SourceAction
+              RunOrder: 1
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1              # Don't know the purpose of 'version'
+              Configuration: 
+                Owner: !Select [0, !Split [ "/" , !Ref GitHubRepositoryTax ]]
+                Repo: !Select [1, !Split [ "/" , !Ref GitHubRepositoryTax ]]
+                Branch: !Select [2, !Split [ "/" , !Ref GitHubRepositoryTax ]]
+                PollForSourceChanges: true   # Don't know if/how to control frequency
+                OAuthToken: !Ref GitHubOAuthToken     # Public repository, Don't know why AWS needs this
+              OutputArtifacts: 
+                - Name: TheSourceCode
+        # Stage 2:  Build using CodeBuild:
+        - Name: Build
+          Actions: 
+            - Name: Build
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheSourceCode       # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS       
+                Provider: CodeBuild        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+              OutputArtifacts: 
+                - Name: TheArtifact
+        # Stage 3:  Copy to S3 bucket
+        - Name: Copy
+          Actions: 
+            - Name: Copy
+              RunOrder: 1
+              InputArtifacts: 
+                - Name: TheArtifact         # Duh, the output from the previous step.
+              ActionTypeId: 
+                Category: Deploy
+                Owner: AWS       
+                Provider: S3        
+                Version: 1                  # Don't know the purpose of 'version'
+              Configuration:
+                # Apparently, there is no way to specify prefix.
+                # You can specify object name, but it comes from the build output and there is no way to automate this :-(
+                # The best you can do is tell it to extract, which produces the "target" folder in the bucket.
+                BucketName: !Ref S3Output
+                Extract: true
+
+Outputs:
+  CodeBuild:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/projects/${MyBuild}/
+
+  CartCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${CartPipe}/view
+
+  CheckoutCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${CheckoutPipe}/view
+
+  PricingCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${PricingPipe}/view
+
+  PromotionCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${PromotionPipe}/view
+
+  ProductCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${ProductPipe}/view
+
+  ShippingCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${ShippingPipe}/view
+
+  TaxCodePipeline:
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${TaxPipe}/view
+
