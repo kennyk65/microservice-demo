@@ -164,10 +164,10 @@ Resources:
   # Pipeline, so no need for details on Source and Artifacts.  Most of the details
   # on how to to the build itself is in the project's buildspec: https://github.com/kennyk65/aws-cloudbuild-demo/blob/master/buildspec.yml
   #  TODO: FIGURE OUT CACHE.  Apparently only option is S3, which defeats the purpose.
-  MyBuild:
+  DockerBuild:
     Type: AWS::CodeBuild::Project
     Properties: 
-      Name: microservice-build
+      Name: microservice-build2
       Description: Demo of CodeBuild for any of the Microservices.
       Source:
         Type: CODEPIPELINE
@@ -176,9 +176,9 @@ Resources:
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
-#        Image: aws/codebuild/java:openjdk-8
-        Image: aws/codebuild/docker:17.09.0
-        PrivilegedMode: false
+#        Image: aws/codebuild/docker:17.09.0
+        Image: kennyk65/dockerplusjdk8:latest
+        PrivilegedMode: true
         EnvironmentVariables:
         - Name: DOCKER_HUB_USER
           Type: PLAINTEXT
@@ -232,7 +232,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -297,7 +297,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -362,7 +362,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -427,7 +427,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -492,7 +492,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -557,7 +557,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -622,7 +622,7 @@ Resources:
                 Provider: CodeBuild        
                 Version: 1                  # Don't know the purpose of 'version'
               Configuration:
-                ProjectName:  !Ref MyBuild  # See the CodeBuild definition above.       
+                ProjectName:  !Ref DockerBuild  # See the CodeBuild definition above.       
               OutputArtifacts: 
                 - Name: TheArtifact
         # Stage 3:  Copy to S3 bucket
@@ -646,7 +646,7 @@ Resources:
 
 Outputs:
   CodeBuild:
-    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/projects/${MyBuild}/
+    Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/projects/${DockerBuild}/
 
   CartCodePipeline:
     Value:  !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${CartPipe}/view
