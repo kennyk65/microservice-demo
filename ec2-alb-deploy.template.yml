@@ -1,0 +1,602 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+# This template deploys our 7 microservices onto ordinary EC2 instances within ASGs behind a common ALB.
+# The ALB is used for service discovery: each service calls the others via a sub-path of the ALB.
+# This template assumes the WAR files have been created and are available on S3.
+# This template assumes a VPC is available, use default or use base-network.template.yml to make one.
+
+Parameters:
+  AmazonLinux2AMI:
+    Type:  AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: You probably won't need to change this value.  This is looking up the latest AMI using the Parameter Store...
+
+  MicroserviceCartWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Cart service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-cart-1.war
+
+  MicroserviceCheckoutWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Checkout service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-checkout-1.war
+
+  MicroserviceProductWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Product service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-product-1.war
+
+  MicroservicePromotionWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Prodmotion service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-promotion-1.war
+
+  MicroservicePricingWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Pricing service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-pricing-1.war
+
+  MicroserviceShippingWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Shipping service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-shipping-1.war
+
+  MicroserviceTaxWar:
+    Type: String
+    Description:  HTTP/S url of the WAR to be downloaded and used for the Tax service.
+    Default: https://kk-uploads-oregon.s3.amazonaws.com/target/microservice-demo-tax-1.war
+
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: Select a VPC that allows instances access to the Internet.
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select 1-2 subnets in your selected VPC, private preferred if NATting is setup.  EC2 instances will run here.
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select 1-2 public subnets in your selected VPC.  Load Balancer nodes will run here.
+
+
+Resources:
+
+  # Security Group for the web server.  Allow HTTP from anywhere, but SSH only from the Bastion server:
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Web server
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub WebServerSecurityGroup-${AWS::StackName}
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  # An Application Load Balancer.  We will use a single ALB for all of the services.
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ALB-${AWS::StackName}
+      Scheme: internet-facing
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups: [!Ref WebServerSecurityGroup ]
+
+  # Our ALB Listener.  Listen on port 80.  If no specific path present on URL, forward to the CheckoutTargetGroup:
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      LoadBalancerArn: !Ref ALB
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref CheckoutTargetGroup
+
+
+  # CART
+  # Launch Configuration for our web server running within an ASG:            
+  CartLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroserviceCartWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource CartAutoScalingGroup 
+          java -jar app.war --server.port=80
+
+  CartAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref CartLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref CartTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Cart Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # TargetGroup
+  CartTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub CartTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward Cart traffic to the Cart service:
+  CartListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref CartTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/carts/*" 
+      Priority: 1
+
+
+
+
+  # CHECKOUT
+  # Launch Configuration for our web server running within an ASG:            
+  CheckoutLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroserviceCheckoutWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource CheckoutAutoScalingGroup 
+          java -jar app.war --server.port=80 --cart.service.url=http://${ALB.DNSName} --pricing.service.url=http://${ALB.DNSName} --shipping.service.url=http://${ALB.DNSName}
+
+  CheckoutAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref CheckoutLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref CheckoutTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Checkout Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # TargetGroup
+  CheckoutTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub CheckoutTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward checkout traffic to the Checkout service:
+  CheckoutListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref CheckoutTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/checkout/*" 
+      Priority: 2
+
+
+
+
+  # PRODUCT
+  # Launch Configuration for our web server running within an ASG:            
+  ProductLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroserviceProductWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource ProductAutoScalingGroup 
+          java -jar app.war --server.port=80
+
+  ProductAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref ProductLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref ProductTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Product Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # TargetGroup
+  ProductTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ProductTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward product traffic to the product service:
+  ProductListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref ProductTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/products/*" 
+      Priority: 3
+
+
+
+
+  # PROMOTION
+  # Launch Configuration for our web server running within an ASG:            
+  PromotionLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroservicePromotionWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource PromotionAutoScalingGroup 
+          java -jar app.war --server.port=80
+
+  PromotionAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref PromotionLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref PromotionTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Promotion Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # TargetGroup
+  PromotionTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub PromotionTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward Promotion traffic to the Promotion service:
+  PromotionListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref PromotionTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/promotions/*" 
+      Priority: 4
+
+
+
+
+  # PRICING
+  # Launch Configuration for our web server running within an ASG:            
+  PricingLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroservicePricingWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource PricingAutoScalingGroup 
+          java -jar app.war --server.port=80 --product.service.url=http://${ALB.DNSName} --promotion.service.url=http://${ALB.DNSName} --tax.service.url=http://${ALB.DNSName}
+
+  PricingAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref PricingLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref PricingTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Pricing Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # TargetGroup
+  PricingTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub PricingTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward Pricing traffic to the Pricing service:
+  PricingListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref PricingTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/pricings/*" 
+      Priority: 5
+
+
+
+
+  # SHIPPING
+  # Launch Configuration for our web server running within an ASG:            
+  ShippingLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroserviceShippingWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource ShippingAutoScalingGroup 
+
+          java -jar app.war --server.port=80 --product.service.url=http://${ALB.DNSName} --promotion.service.url=http://${ALB.DNSName}
+
+  ShippingAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref ShippingLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref ShippingTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Shipping Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # ShippingTargetGroup
+  ShippingTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ShippingTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward Shipping traffic to the Shipping service:
+  ShippingListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref ShippingTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/shippings/*" 
+      Priority: 6
+
+
+
+
+  # TAX
+  # Launch Configuration for our web server running within an ASG:            
+  TaxLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmazonLinux2AMI
+      InstanceType: t2.micro          # Any instance type will do
+      SecurityGroups: [ !Ref WebServerSecurityGroup ]   # Plug in the security group.
+      UserData:                     #  This code Installs a Spring Boot app. Notice a different way to signal completion:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install java-1.8.0 -y
+          wget ${MicroserviceTaxWar} -O app.war
+          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --region ${AWS::Region} --resource TaxAutoScalingGroup 
+          java -jar app.war --server.port=80
+
+  TaxAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds 
+      LaunchConfigurationName: !Ref TaxLaunchConfig
+      MinSize: 1        # Minimum = 1 & Max = 1 means always keep 1 running :-)
+      MaxSize: 3
+      DesiredCapacity: 1
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:  [ !Ref TaxTargetGroup ]
+      Tags:
+      - Key: Name
+        Value: Tax Service
+        PropagateAtLaunch: true
+    # ASG is creates when at least one instance signals it is ready.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+
+  # TaxTargetGroup
+  TaxTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub TaxTargetGroup-${AWS::StackName}
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # Forward Tax traffic to the Tax service:
+  TaxListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Ref: ALBListener
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref TaxTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/taxes/*" 
+      Priority: 7
+
+
+# Finally, what we should see when we are all done.  The ELB's DNS name is the URL of our website:
+Outputs:
+
+  ELBEndpoint:
+    Description: The URL for our Elastic Load Balancer.
+    Value: !Join ['', ["http://", !GetAtt ALB.DNSName ]]
