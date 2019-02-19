@@ -176,7 +176,8 @@ Resources:
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/java:openjdk-8
+#        Image: aws/codebuild/java:openjdk-8
+        Image: aws/codebuild/docker:17.09.0
         PrivilegedMode: false
         EnvironmentVariables:
         - Name: DOCKER_HUB_USER
